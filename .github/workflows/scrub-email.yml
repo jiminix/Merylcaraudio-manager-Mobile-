@@ -1,0 +1,79 @@
+name: Scrub personal email from Git history
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/scrub-email.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  scrub:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Rewrite all branches and tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OLD_EMAIL="jiminix@gmail.com"
+          NEW_EMAIL="1089106+jiminix@users.noreply.github.com"
+
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --tags --force
+
+          # Create local tracking branches for every remote branch.
+          for ref in $(git for-each-ref --format='%(refname)' refs/remotes/origin/); do
+            case "$ref" in
+              refs/remotes/origin/HEAD) continue ;;
+            esac
+            branch="${ref#refs/remotes/origin/}"
+            if [ "$branch" != "main" ]; then
+              git branch -f "$branch" "$ref"
+            fi
+          done
+
+          FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --force --env-filter '
+          if [ "$GIT_AUTHOR_EMAIL" = "'"$OLD_EMAIL"'" ]; then
+              export GIT_AUTHOR_EMAIL="'"$NEW_EMAIL"'"
+          fi
+          if [ "$GIT_COMMITTER_EMAIL" = "'"$OLD_EMAIL"'" ]; then
+              export GIT_COMMITTER_EMAIL="'"$NEW_EMAIL"'"
+          fi
+          ' --tag-name-filter cat -- --all
+
+          git for-each-ref --format='delete %(refname)' refs/original | git update-ref --stdin || true
+          git reflog expire --expire=now --all
+          git gc --prune=now
+
+          if git log --all --format='%ae%n%ce' | grep -F "$OLD_EMAIL"; then
+              echo "Old email still found after rewrite."
+              exit 1
+          fi
+
+          git config user.name "jiminix"
+          git config user.email "$NEW_EMAIL"
+
+          git checkout main
+          git rm -f .github/workflows/scrub-email.yml
+          git commit -m "Remove one-time history scrub workflow"
+
+          git push --force origin --all
+          git push --force origin --tags
+
+      - name: Verify
+        shell: bash
+        run: |
+          if git log --all --format='%ae%n%ce' | grep -F "jiminix@gmail.com"; then
+              exit 1
+          fi
+          echo "Personal email removed from all rewritten refs."
